@@ -1,0 +1,15 @@
+# Secrets — never commit
+.env
+
+# Runtime data
+manga.db
+scan_log.jsonl
+covers/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local tooling config — machine-specific, not project source
+.claude/

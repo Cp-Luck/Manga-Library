@@ -1,0 +1,421 @@
+<!--
+Collection browser — grid view of the library, grouped by series.
+Dark, dense card grid modeled after the user's reference (MangaUpdates-style
+library view: dark bg, cover-dominant cards, corner badge, title underneath).
+Fetches GET /library (each volume already carries a cover_url, computed
+server-side from the stored filesystem path — see _cover_url() in main.py).
+
+Clicking a cover opens an edit panel: fix the volume number, move it to a
+different (or brand new) series, or attach a cover image by hand — for the
+cases Google Books' API doesn't cover cleanly (an inconsistent/incomplete
+title, a missing volume number, no cover art) — or remove the volume outright.
+-->
+<div id="collection-root">
+  <div id="collection-nav"><a href="/">📷 Scan</a><span class="current">📚 Collection</span></div>
+  <div id="collection-toolbar">
+    <span id="collection-count"></span>
+    <input id="search-box" type="search" placeholder="Filter by series or author..." />
+  </div>
+  <div id="collection-status"></div>
+  <div id="series-list"></div>
+</div>
+
+<div id="edit-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-panel">
+    <button id="modal-close" class="modal-close" aria-label="Close">✕</button>
+    <img id="modal-cover-preview" class="modal-cover-preview" style="display:none;" />
+    <div id="modal-cover-placeholder" class="modal-cover-placeholder">No cover yet</div>
+    <h3 id="modal-title"></h3>
+    <div id="modal-isbn" class="modal-isbn"></div>
+
+    <label class="modal-field">
+      Series
+      <input id="modal-series-input" type="text" list="series-datalist" placeholder="Series name" />
+      <datalist id="series-datalist"></datalist>
+      <span class="modal-field-hint">Pick an existing series to merge into it, or type a new name</span>
+    </label>
+
+    <label class="modal-field">
+      Volume number
+      <input id="modal-volume-input" type="number" inputmode="numeric" placeholder="e.g. 4" />
+    </label>
+
+    <label class="modal-field">
+      Cover image <span class="modal-field-hint">(Google Books didn't provide one for every ISBN — set it by hand here)</span>
+      <input id="modal-cover-input" type="file" accept="image/*" />
+    </label>
+
+    <div id="modal-message" class="modal-message"></div>
+
+    <div class="modal-actions">
+      <button id="modal-save-btn" class="modal-save-btn">Save</button>
+      <button id="modal-remove-btn" class="modal-remove-btn">Remove from collection</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const API_BASE = window.location.origin;
+  const seriesList = document.getElementById("series-list");
+  const status = document.getElementById("collection-status");
+  const countEl = document.getElementById("collection-count");
+  const searchBox = document.getElementById("search-box");
+
+  const editModal = document.getElementById("edit-modal");
+  const modalClose = document.getElementById("modal-close");
+  const modalCoverPreview = document.getElementById("modal-cover-preview");
+  const modalCoverPlaceholder = document.getElementById("modal-cover-placeholder");
+  const modalTitle = document.getElementById("modal-title");
+  const modalIsbn = document.getElementById("modal-isbn");
+  const modalSeriesInput = document.getElementById("modal-series-input");
+  const seriesDatalist = document.getElementById("series-datalist");
+  const modalVolumeInput = document.getElementById("modal-volume-input");
+  const modalCoverInput = document.getElementById("modal-cover-input");
+  const modalMessage = document.getElementById("modal-message");
+  const modalSaveBtn = document.getElementById("modal-save-btn");
+  const modalRemoveBtn = document.getElementById("modal-remove-btn");
+
+  let allVolumes = [];
+  let editingVolume = null;
+
+  function groupBySeries(volumes) {
+    const groups = new Map();
+    for (const v of volumes) {
+      if (!groups.has(v.series_id)) {
+        groups.set(v.series_id, { title: v.series_title, author: v.author, volumes: [] });
+      }
+      groups.get(v.series_id).volumes.push(v);
+    }
+    return [...groups.values()];
+  }
+
+  function volumeCard(v) {
+    const card = document.createElement("div");
+    card.className = "volume-card";
+    card.title = "Click to edit";
+
+    if (v.cover_url) {
+      const img = document.createElement("img");
+      img.src = v.cover_url;
+      img.alt = `${v.series_title} vol. ${v.volume_number ?? "?"}`;
+      img.loading = "lazy";
+      card.appendChild(img);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "cover-placeholder";
+      placeholder.textContent = "No cover yet";
+      card.appendChild(placeholder);
+    }
+
+    const badge = document.createElement("div");
+    badge.className = "volume-badge";
+    badge.textContent = v.volume_number != null ? v.volume_number : "?";
+    card.appendChild(badge);
+
+    card.addEventListener("click", () => openEditModal(v));
+
+    return card;
+  }
+
+  function openEditModal(v) {
+    editingVolume = v;
+    modalTitle.textContent = v.series_title + (v.volume_number != null ? ` vol. ${v.volume_number}` : "");
+    modalIsbn.textContent = v.isbn ? `ISBN ${v.isbn}` : "No ISBN on record";
+    modalSeriesInput.value = v.series_title;
+    modalVolumeInput.value = v.volume_number ?? "";
+    modalCoverInput.value = "";
+    modalMessage.textContent = "";
+
+    if (v.cover_url) {
+      modalCoverPreview.src = v.cover_url;
+      modalCoverPreview.style.display = "block";
+      modalCoverPlaceholder.style.display = "none";
+    } else {
+      modalCoverPreview.style.display = "none";
+      modalCoverPlaceholder.style.display = "flex";
+    }
+
+    editModal.style.display = "flex";
+  }
+
+  function closeEditModal() {
+    editModal.style.display = "none";
+    editingVolume = null;
+  }
+
+  modalClose.addEventListener("click", closeEditModal);
+  editModal.addEventListener("click", (e) => {
+    if (e.target === editModal) closeEditModal(); // backdrop click
+  });
+
+  modalSaveBtn.addEventListener("click", async () => {
+    if (!editingVolume) return;
+    modalSaveBtn.disabled = true;
+    modalMessage.textContent = "Saving...";
+
+    try {
+      const raw = modalVolumeInput.value.trim();
+      const newVolumeNumber = raw === "" ? null : parseInt(raw, 10);
+      const newSeriesTitle = modalSeriesInput.value.trim();
+
+      const patchBody = {};
+      if (newVolumeNumber !== editingVolume.volume_number) {
+        patchBody.volume_number = newVolumeNumber;
+      }
+      // Case-insensitive compare — the backend matches series the same way
+      // (Google Books itself isn't consistent about title casing), so
+      // resubmitting the same name in different casing is a no-op there.
+      if (newSeriesTitle && newSeriesTitle.toLowerCase() !== editingVolume.series_title.toLowerCase()) {
+        patchBody.series_title = newSeriesTitle;
+      }
+      if (Object.keys(patchBody).length > 0) {
+        const res = await fetch(`${API_BASE}/volumes/${editingVolume.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patchBody),
+        });
+        if (!res.ok) throw new Error(`Update failed (${res.status})`);
+      }
+
+      const file = modalCoverInput.files[0];
+      if (file) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch(`${API_BASE}/volumes/${editingVolume.id}/cover`, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) throw new Error(`Cover upload failed (${res.status})`);
+      }
+
+      closeEditModal();
+      await load();
+    } catch (err) {
+      modalMessage.textContent = "Failed to save — check connection and try again.";
+      console.error(err);
+    } finally {
+      modalSaveBtn.disabled = false;
+    }
+  });
+
+  modalRemoveBtn.addEventListener("click", async () => {
+    if (!editingVolume) return;
+    const removed = await removeVolume(editingVolume);
+    if (removed) closeEditModal();
+  });
+
+  async function removeVolume(v) {
+    const label = v.series_title + (v.volume_number != null ? ` vol. ${v.volume_number}` : "");
+    if (!confirm(`Remove ${label} from your collection? This can't be undone.`)) {
+      return false;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/volumes/${v.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`${res.status}`);
+      await load(); // refetch so counts and series grouping stay correct
+      return true;
+    } catch (err) {
+      alert("Failed to remove — check connection and try again.");
+      console.error(err);
+      return false;
+    }
+  }
+
+  function seriesSection(group) {
+    const section = document.createElement("section");
+    section.className = "series-section";
+
+    const header = document.createElement("div");
+    header.className = "series-header";
+    header.innerHTML = `<h2>${escapeHtml(group.title)}</h2>` +
+      `<span class="series-meta">${group.volumes.length} vol.${group.author ? " · " + escapeHtml(group.author) : ""}</span>`;
+    section.appendChild(header);
+
+    const grid = document.createElement("div");
+    grid.className = "volume-grid";
+    group.volumes
+      .slice()
+      .sort((a, b) => (a.volume_number ?? 999) - (b.volume_number ?? 999))
+      .forEach(v => grid.appendChild(volumeCard(v)));
+    section.appendChild(grid);
+
+    return section;
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement("div");
+    div.textContent = s ?? "";
+    return div.innerHTML;
+  }
+
+  function render(volumes) {
+    seriesList.innerHTML = "";
+    if (volumes.length === 0) {
+      status.textContent = allVolumes.length === 0
+        ? "Nothing in the library yet — scan a barcode to add your first volume."
+        : "No matches.";
+      return;
+    }
+    status.textContent = "";
+    groupBySeries(volumes)
+      .sort((a, b) => a.title.localeCompare(b.title))
+      .forEach(group => seriesList.appendChild(seriesSection(group)));
+  }
+
+  function updateCount() {
+    const seriesCount = new Set(allVolumes.map(v => v.series_id)).size;
+    countEl.textContent = `${allVolumes.length} volume${allVolumes.length === 1 ? "" : "s"} · ${seriesCount} series`;
+  }
+
+  searchBox.addEventListener("input", () => {
+    const q = searchBox.value.trim().toLowerCase();
+    if (!q) {
+      render(allVolumes);
+      return;
+    }
+    render(allVolumes.filter(v =>
+      v.series_title.toLowerCase().includes(q) ||
+      (v.author && v.author.toLowerCase().includes(q))
+    ));
+  });
+
+  async function loadSeriesDatalist() {
+    try {
+      const res = await fetch(`${API_BASE}/series`);
+      if (!res.ok) return;
+      const allSeries = await res.json();
+      seriesDatalist.innerHTML = "";
+      allSeries.forEach(s => {
+        const option = document.createElement("option");
+        option.value = s.title;
+        seriesDatalist.appendChild(option);
+      });
+    } catch (err) {
+      console.error("Failed to load series list:", err);
+    }
+  }
+
+  async function load() {
+    status.textContent = "Loading...";
+    try {
+      const res = await fetch(`${API_BASE}/library`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      allVolumes = await res.json();
+      updateCount();
+      render(allVolumes);
+      loadSeriesDatalist(); // keep autocomplete in sync with any series added/merged
+    } catch (err) {
+      status.textContent = "Failed to load library — check the backend is running.";
+      console.error(err);
+    }
+  }
+
+  load();
+})();
+</script>
+
+<style>
+  :root {
+    --bg: #121212;
+    --bg-card: #1e1e1e;
+    --border: #2a2a2a;
+    --text: #eaeaea;
+    --text-muted: #9a9a9a;
+    --accent: #4ade80;
+  }
+
+  body { background: var(--bg); }
+
+  #collection-root { max-width: 1200px; margin: 0 auto; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 0 16px 32px; color: var(--text); background: var(--bg); }
+
+  #collection-nav { display: flex; gap: 16px; padding: 14px 0; font-size: 14px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  #collection-nav a { color: var(--text-muted); text-decoration: none; }
+  #collection-nav a:hover { color: var(--text); }
+  #collection-nav .current { color: var(--accent); font-weight: 600; }
+
+  #collection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  #collection-count { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+  #search-box {
+    flex: 1; min-width: 200px; max-width: 320px; box-sizing: border-box;
+    padding: 8px 12px; font-size: 14px; color: var(--text);
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+  }
+  #search-box::placeholder { color: var(--text-muted); }
+  #search-box:focus { outline: none; border-color: var(--accent); }
+
+  #collection-status { font-size: 14px; color: var(--text-muted); padding: 8px 0; }
+
+  .series-section { margin-bottom: 32px; }
+  .series-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .series-header h2 { font-size: 16px; margin: 0; font-weight: 600; color: var(--text); }
+  .series-meta { font-size: 12px; color: var(--text-muted); }
+
+  .volume-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 14px; }
+
+  .volume-card {
+    position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
+    background: var(--bg-card); border: 1px solid var(--border);
+    aspect-ratio: 2 / 3; box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .volume-card:hover { transform: translateY(-2px); box-shadow: 0 0 0 2px var(--accent), 0 4px 10px rgba(0,0,0,0.5); }
+  .volume-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .cover-placeholder {
+    width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+    text-align: center; font-size: 11px; color: var(--text-muted); padding: 8px; box-sizing: border-box;
+  }
+
+  .volume-badge {
+    position: absolute; top: 6px; right: 6px;
+    background: rgba(0,0,0,0.75); color: #fff; font-size: 11px; font-weight: 600;
+    padding: 2px 7px; border-radius: 10px; line-height: 1.4;
+  }
+
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; z-index: 100;
+  }
+  .modal-panel {
+    position: relative; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; width: 100%; max-width: 340px;
+    max-height: 90vh; overflow-y: auto; box-sizing: border-box;
+  }
+  .modal-close {
+    position: absolute; top: 10px; right: 10px; background: none; border: none;
+    color: var(--text-muted); font-size: 16px; cursor: pointer; line-height: 1; padding: 4px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-cover-preview, .modal-cover-placeholder {
+    width: 100%; aspect-ratio: 2 / 3; border-radius: 6px; object-fit: cover;
+    background: #262626; margin-bottom: 14px; box-sizing: border-box;
+  }
+  .modal-cover-placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 12px; }
+  #modal-title { font-size: 15px; margin: 0 0 2px; padding-right: 20px; }
+  #modal-isbn { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, "SF Mono", Consolas, monospace; margin-bottom: 14px; }
+
+  .modal-field { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 12px; }
+  .modal-field-hint { display: block; font-size: 11px; margin-top: 2px; }
+  .modal-field input {
+    display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
+    padding: 8px 10px; font-size: 14px; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .modal-field input:focus { outline: none; border-color: var(--accent); }
+  .modal-field input[type="file"] { padding: 6px; font-size: 12px; }
+
+  .modal-message { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-bottom: 8px; }
+
+  .modal-actions { display: flex; flex-direction: column; gap: 8px; }
+  .modal-save-btn {
+    padding: 10px; font-size: 14px; font-weight: 600; color: #0a0a0a;
+    background: var(--accent); border: none; border-radius: 6px; cursor: pointer;
+  }
+  .modal-save-btn:disabled { opacity: 0.6; cursor: default; }
+  .modal-remove-btn {
+    padding: 10px; font-size: 13px; color: #e74c3c;
+    background: none; border: 1px solid #e74c3c; border-radius: 6px; cursor: pointer;
+  }
+</style>

@@ -1,0 +1,254 @@
+<!--
+ISBN barcode scanner — client-side, mobile-friendly.
+
+Uses the native BarcodeDetector API where available (Chrome/Android — fast,
+no library download). Falls back to ZXing-js for browsers without it
+(notably iOS Safari, as of testing in 2026 — check current support before
+relying on this split).
+
+Flow:
+1. Open camera, stream to <video>
+2. Every ~200ms, grab a frame and look for an EAN-13 barcode (ISBNs use EAN-13)
+3. On detection: stop scanning, look up the ISBN, confirm it's the right book
+
+Cover images come from Google Books (fetched server-side during the lookup)
+— there's no camera-based cover capture here anymore. If Google Books has
+no cover for an ISBN, the volume is just added without one.
+-->
+<div id="scanner-root">
+  <div id="scanner-nav"><span class="current">📷 Scan</span><a href="/collection">📚 Collection</a></div>
+  <video id="scanner-video" autoplay playsinline muted></video>
+  <div id="scanner-status">Point camera at the barcode</div>
+  <div id="confirm-row" style="display:none;">
+    <button id="confirm-yes-btn">✓ Yes, that's it</button>
+    <button id="confirm-no-btn">✗ Wrong manga</button>
+  </div>
+  <button id="scan-again-btn" style="display:none;">Scan again</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.23.0/umd/index.min.js"></script>
+<script>
+(function () {
+  const video = document.getElementById("scanner-video");
+  const status = document.getElementById("scanner-status");
+  const scanAgainBtn = document.getElementById("scan-again-btn");
+  const confirmRow = document.getElementById("confirm-row");
+  const confirmYesBtn = document.getElementById("confirm-yes-btn");
+  const confirmNoBtn = document.getElementById("confirm-no-btn");
+
+  let stream = null;
+  let stopScanning = false;
+  let lastResult = null;
+
+  async function startCamera() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" } // rear camera on phones
+    });
+    video.srcObject = stream;
+    await video.play();
+  }
+
+  function stopCamera() {
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+  }
+
+  // BarcodeDetector exists as an API surface in every Chromium-based browser,
+  // but real detection is backed by a model component only genuine Google
+  // Chrome is authorized to download — Opera/Edge/Brave/Vivaldi report the
+  // API as present and never throw, but detect() silently returns [] forever.
+  // So don't trust feature-presence alone; require an actual Chrome UA.
+  function nativeDetectorWorks() {
+    if (!("BarcodeDetector" in window)) return false;
+    const ua = navigator.userAgent;
+    const isChromiumFork = /OPR\/|Edg\/|Brave\/|Vivaldi\/|SamsungBrowser\//.test(ua);
+    return !isChromiumFork;
+  }
+
+  function startScanning() {
+    if (nativeDetectorWorks()) {
+      scanWithNativeDetector();
+    } else {
+      scanWithZXing();
+    }
+  }
+
+  // --- Path A: native BarcodeDetector (fast, no library overhead) ---
+  async function scanWithNativeDetector() {
+    const detector = new BarcodeDetector({ formats: ["ean_13"] });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    async function tick() {
+      if (stopScanning) return;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0);
+
+      try {
+        const barcodes = await detector.detect(canvas);
+        if (barcodes.length > 0) {
+          onBarcodeDetected(barcodes[0].rawValue);
+          return; // stop the loop, we found one
+        }
+      } catch (err) {
+        console.error("Detection error:", err);
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  // --- Path B: ZXing fallback for browsers without a working BarcodeDetector ---
+  function scanWithZXing() {
+    const codeReader = new ZXing.BrowserMultiFormatReader();
+
+    // Not decodeFromVideoDevice / decodeFromVideoElementContinuously: both
+    // internally wait for the video's 'playing' event before decoding ever
+    // starts. startCamera() already called video.play(), so that event
+    // already fired once and won't fire again — those methods just hang
+    // forever with no error. codeReader.decode(video) grabs the current
+    // frame directly with no dependency on play-state events, so drive our
+    // own loop with it, the same way the native BarcodeDetector path does.
+    function tick() {
+      if (stopScanning) return;
+      try {
+        const result = codeReader.decode(video);
+        onBarcodeDetected(result.getText());
+        return; // stop the loop, we found one
+      } catch (err) {
+        if (!(err instanceof ZXing.NotFoundException)) {
+          console.error("Detection error:", err);
+        }
+        // NotFoundException fires continuously on no-match frames — expected, ignore it
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  function onBarcodeDetected(isbn) {
+    stopScanning = true;
+    lastResult = isbn;
+    status.textContent = `Found ISBN: ${isbn} — looking up...`;
+    flashDetected();
+    scanAgainBtn.style.display = "block"; // shown immediately — a misread barcode needs to be interruptible before the lookup even finishes
+    lookupISBN(isbn);
+  }
+
+  // Aborts whatever the current scan/lookup state is and restarts camera
+  // scanning fresh — used by "Scan again" and after a confirmed match.
+  function resetForNextScan() {
+    status.textContent = "Point camera at the barcode";
+    scanAgainBtn.style.display = "none";
+    confirmRow.style.display = "none";
+    currentVolumeId = null;
+    currentWasNewlyAdded = false;
+    stopScanning = false;
+    startScanning();
+  }
+
+  scanAgainBtn.addEventListener("click", resetForNextScan);
+
+  confirmYesBtn.addEventListener("click", () => {
+    confirmRow.style.display = "none";
+    const coverNote = currentHasCover ? "Cover added." : "No cover available online.";
+    resetForNextScan();
+    status.textContent = `${coverNote} Ready for the next scan.`;
+  });
+
+  confirmNoBtn.addEventListener("click", async () => {
+    confirmRow.style.display = "none";
+
+    // Only delete if this exact scan is what created the volume — never
+    // touch something that was already in the library before this scan,
+    // even if it's not the physical book the user meant to scan.
+    if (currentWasNewlyAdded && currentVolumeId) {
+      try {
+        await fetch(`${API_BASE}/volumes/${currentVolumeId}`, { method: "DELETE" });
+      } catch (err) {
+        console.error("Failed to remove misidentified volume:", err);
+      }
+    }
+
+    resetForNextScan();
+    status.textContent = "Okay — scan again.";
+  });
+
+  // Visible + haptic cue that a barcode was caught, since the status text
+  // alone is easy to miss while holding the phone up to a shelf.
+  function flashDetected() {
+    video.classList.add("detected");
+    setTimeout(() => video.classList.remove("detected"), 400);
+    if (navigator.vibrate) navigator.vibrate(100);
+  }
+
+  // Same origin the page itself was loaded from — works automatically
+  // whether that's localhost, a LAN IP, or an ngrok tunnel, since this
+  // page is now served directly by the FastAPI backend at "/".
+  const API_BASE = window.location.origin;
+
+  let currentVolumeId = null;
+  let currentWasNewlyAdded = false;
+  let currentHasCover = false;
+
+  async function lookupISBN(isbn) {
+    try {
+      const res = await fetch(`${API_BASE}/scan/isbn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isbn })
+      });
+
+      if (res.status === 404) {
+        status.textContent = `ISBN ${isbn} not found in Google Books. Add manually.`;
+        return;
+      }
+      if (!res.ok) {
+        status.textContent = `Lookup failed (${res.status}). Retry.`;
+        return;
+      }
+
+      const volume = await res.json();
+      currentVolumeId = volume.id;
+      currentWasNewlyAdded = !volume.already_owned;
+      currentHasCover = !!volume.has_cover;
+
+      status.textContent = volume.already_owned
+        ? `Already in your library: ${volume.series_title} vol. ${volume.volume_number ?? "?"} — is this right?`
+        : `Added: ${volume.series_title} vol. ${volume.volume_number ?? "?"} — is this right?`;
+
+      confirmRow.style.display = "flex";
+    } catch (err) {
+      status.textContent = "Lookup failed — check connection and retry.";
+      console.error(err);
+    }
+  }
+
+  async function init() {
+    await startCamera();
+    startScanning();
+  }
+
+  init().catch(err => {
+    status.textContent = "Camera access failed: " + err.message;
+  });
+
+  window.addEventListener("beforeunload", stopCamera);
+})();
+</script>
+
+<style>
+  #scanner-root { max-width: 480px; margin: 0 auto; font-family: sans-serif; }
+  #scanner-nav { display: flex; gap: 16px; padding: 12px 0; font-size: 14px; }
+  #scanner-nav a { color: #2ecc71; text-decoration: none; }
+  #scanner-nav .current { font-weight: bold; }
+  #scanner-video { width: 100%; display: block; border-radius: 8px; background: #000; border: 4px solid transparent; transition: border-color 0.15s ease; }
+  #scanner-video.detected { border-color: #2ecc71; }
+  #scanner-status { padding: 8px 0; font-size: 14px; }
+  #scan-again-btn { padding: 10px 16px; font-size: 14px; background: none; border: 1px solid #999; border-radius: 4px; }
+  #confirm-row { display: flex; gap: 8px; }
+  #confirm-yes-btn { padding: 10px 16px; font-size: 14px; background: #2ecc71; color: #fff; border: none; border-radius: 4px; }
+  #confirm-no-btn { padding: 10px 16px; font-size: 14px; background: none; border: 1px solid #e74c3c; color: #e74c3c; border-radius: 4px; }
+</style>
