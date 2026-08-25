@@ -15,10 +15,11 @@ Cover-image handling lives in covers.py, Google Books title parsing in
 titles.py, and request/response schemas in models.py — this file is just
 app setup and the routes themselves.
 """
+
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -29,10 +30,17 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .covers import COVERS_DIR, cover_url, save_cover, try_fetch_cover_from_google
-from .models import IsbnScanRequest, ManualVolumeRequest, VolumeResponse, VolumeUpdateRequest
+from .models import (
+    IsbnScanRequest,
+    ManualVolumeRequest,
+    VolumeResponse,
+    VolumeUpdateRequest,
+)
 from .titles import parse_title
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/backend/main.py -> project root
+PROJECT_ROOT = Path(
+    __file__
+).parent.parent.parent  # app/backend/main.py -> project root
 FRONTEND_DIR = PROJECT_ROOT / "app" / "frontend"
 
 load_dotenv(PROJECT_ROOT / ".env")  # never commit that file
@@ -70,7 +78,7 @@ SCAN_LOG_PATH = PROJECT_ROOT / "scan_log.jsonl"
 def log_scan_event(event: dict):
     """Append-only record of every scan, one JSON object per line, in the
     order it happened — a plain-text history alongside the SQLite state."""
-    entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **event}
+    entry = {"timestamp": datetime.now(UTC).isoformat(), **event}
     with open(SCAN_LOG_PATH, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -90,14 +98,16 @@ async def scan_isbn(payload: IsbnScanRequest):
 
     existing = db.get_volume_by_isbn(isbn)
     if existing:
-        log_scan_event({
-            "event": "scan_isbn",
-            "isbn": isbn,
-            "volume_id": existing["id"],
-            "series_title": existing["series_title"],
-            "volume_number": existing["volume_number"],
-            "already_owned": True,
-        })
+        log_scan_event(
+            {
+                "event": "scan_isbn",
+                "isbn": isbn,
+                "volume_id": existing["id"],
+                "series_title": existing["series_title"],
+                "volume_number": existing["volume_number"],
+                "already_owned": True,
+            }
+        )
         return VolumeResponse(
             id=existing["id"],
             series_title=existing["series_title"],
@@ -120,7 +130,9 @@ async def scan_isbn(payload: IsbnScanRequest):
     data = resp.json()
 
     if not resp.is_success:
-        message = data.get("error", {}).get("message", "Google Books API request failed")
+        message = data.get("error", {}).get(
+            "message", "Google Books API request failed"
+        )
         raise HTTPException(
             status_code=502,
             detail=f"Google Books lookup failed ({resp.status_code}): {message}. Try again shortly.",
@@ -142,15 +154,17 @@ async def scan_isbn(payload: IsbnScanRequest):
 
     has_cover = await try_fetch_cover_from_google(volume_id, info.get("imageLinks", {}))
 
-    log_scan_event({
-        "event": "scan_isbn",
-        "isbn": isbn,
-        "volume_id": volume_id,
-        "series_title": series_title,
-        "volume_number": volume_number,
-        "already_owned": False,
-        "has_cover": has_cover,
-    })
+    log_scan_event(
+        {
+            "event": "scan_isbn",
+            "isbn": isbn,
+            "volume_id": volume_id,
+            "series_title": series_title,
+            "volume_number": volume_number,
+            "already_owned": False,
+            "has_cover": has_cover,
+        }
+    )
 
     return VolumeResponse(
         id=volume_id,
@@ -175,20 +189,25 @@ def add_volume_manually(payload: ManualVolumeRequest):
 
     isbn = payload.isbn.strip() if payload.isbn else None
     if isbn and db.get_volume_by_isbn(isbn):
-        raise HTTPException(status_code=409, detail="A volume with that ISBN is already in your collection")
+        raise HTTPException(
+            status_code=409,
+            detail="A volume with that ISBN is already in your collection",
+        )
 
     author = payload.author.strip() if payload.author else None
     series_id = db.get_or_create_series(title=series_title, author=author)
     volume_id = db.add_volume(series_id, volume_number=payload.volume_number, isbn=isbn)
 
-    log_scan_event({
-        "event": "add_manual",
-        "isbn": isbn,
-        "volume_id": volume_id,
-        "series_title": series_title,
-        "volume_number": payload.volume_number,
-        "already_owned": False,
-    })
+    log_scan_event(
+        {
+            "event": "add_manual",
+            "isbn": isbn,
+            "volume_id": volume_id,
+            "series_title": series_title,
+            "volume_number": payload.volume_number,
+            "already_owned": False,
+        }
+    )
 
     return VolumeResponse(
         id=volume_id,

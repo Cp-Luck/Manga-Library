@@ -2,11 +2,14 @@
 Data access layer for the manga collection database.
 Thin wrapper around sqlite3 — no ORM, since the schema is small and stable.
 """
-import sqlite3
-from pathlib import Path
-from contextlib import contextmanager
 
-DB_PATH = Path(__file__).parent.parent.parent / "manga.db"  # project root, not inside app/backend/
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+
+DB_PATH = (
+    Path(__file__).parent.parent.parent / "manga.db"
+)  # project root, not inside app/backend/
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -32,6 +35,7 @@ def get_connection():
 
 
 # --- Series ---
+
 
 def get_or_create_series(title, author=None):
     """Look up a series by title; create it if it doesn't exist yet.
@@ -73,7 +77,10 @@ def list_series():
 
 # --- Volumes ---
 
-def add_volume(series_id, volume_number=None, isbn=None, cover_image_path=None, notes=None):
+
+def add_volume(
+    series_id, volume_number=None, isbn=None, cover_image_path=None, notes=None
+):
     with get_connection() as conn:
         cursor = conn.execute(
             """INSERT INTO volumes (series_id, volume_number, isbn, cover_image_path, notes)

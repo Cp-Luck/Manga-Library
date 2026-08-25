@@ -1,6 +1,6 @@
 """Parses a Google Books title into (series_title, volume_number)."""
+
 import re
-from typing import Optional
 
 # Google Books titles carry the volume number in several different shapes
 # depending on publisher/edition — 'Chainsaw Man, Vol. 4', 'Apothecary
@@ -16,7 +16,7 @@ _VOLUME_SUFFIX_RE = re.compile(
 )
 
 
-def parse_title(title: str) -> tuple[str, Optional[int]]:
+def parse_title(title: str) -> tuple[str, int | None]:
     """Splits a Google Books title into (series_title, volume_number).
     Falls back to (title, None) when nothing matches — e.g. a one-shot with
     no volume number at all. Not foolproof; user can correct via the
@@ -24,5 +24,5 @@ def parse_title(title: str) -> tuple[str, Optional[int]]:
     match = _VOLUME_SUFFIX_RE.search(title)
     if not match:
         return title.strip(), None
-    series_title = title[:match.start()].strip().rstrip(",.").strip()
+    series_title = title[: match.start()].strip().rstrip(",.").strip()
     return (series_title or title.strip()), int(match.group(1))

@@ -2,6 +2,7 @@
 covers directory, never the real manga.db / covers/ this app is actually
 tracking your collection in.
 """
+
 import pytest
 
 from app.backend import covers as covers_module

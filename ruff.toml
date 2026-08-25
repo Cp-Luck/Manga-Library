@@ -1,0 +1,16 @@
+target-version = "py312"
+
+# FastAPI's dependency-injection pattern requires calls like File(...),
+# Depends(...), Query(...) as parameter defaults — that's the framework's
+# documented API, not the mutable-default-argument bug B008 exists to catch.
+[lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.File",
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Body",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+]

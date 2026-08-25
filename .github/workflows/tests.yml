@@ -19,5 +19,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Lint (ruff check)
+        run: python -m ruff check .
+
+      - name: Format check (ruff format)
+        run: python -m ruff format --check .
+
       - name: Run tests
         run: python -m pytest -v

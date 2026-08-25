@@ -1,5 +1,6 @@
 """Tests for the db.py data-access layer. Every test gets its own throwaway
 SQLite file via the temp_db fixture — never the real manga.db."""
+
 import sqlite3
 
 import pytest
@@ -31,12 +32,11 @@ def test_series_title_unique_index_rejects_duplicate_insert(temp_db):
     get_or_create_series's own SELECT-before-INSERT check."""
     db.get_or_create_series("Duplicate Series")
 
-    with pytest.raises(sqlite3.IntegrityError):
-        with db.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO series (title, author) VALUES (?, ?)",
-                ("duplicate series", None),  # different case, same title
-            )
+    with pytest.raises(sqlite3.IntegrityError), db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO series (title, author) VALUES (?, ?)",
+            ("duplicate series", None),  # different case, same title
+        )
 
 
 def test_get_or_create_series_handles_lost_race_gracefully(temp_db, monkeypatch):

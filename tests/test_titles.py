@@ -1,5 +1,6 @@
 """Tests for parse_title — matches the documented tricky cases in
 titles.py's own module docstring, plus the no-volume-number fallback."""
+
 import pytest
 
 from app.backend.titles import parse_title
@@ -17,7 +18,9 @@ from app.backend.titles import parse_title
         ("Fullmetal Alchemist, Vol. 27: The Final Volume", "Fullmetal Alchemist", 27),
     ],
 )
-def test_parse_title_extracts_series_and_volume(title, expected_series, expected_volume):
+def test_parse_title_extracts_series_and_volume(
+    title, expected_series, expected_volume
+):
     series, volume = parse_title(title)
     assert series == expected_series
     assert volume == expected_volume

@@ -1,4 +1,5 @@
 """Start the backend: python run.py"""
+
 import atexit
 import re
 import shutil
@@ -32,7 +33,9 @@ def local_ip() -> str:
     """Best-effort LAN IP, so we can print a URL your phone can actually reach."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))  # no packet actually sent, just picks the outbound interface
+        s.connect(
+            ("8.8.8.8", 80)
+        )  # no packet actually sent, just picks the outbound interface
         return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
@@ -58,7 +61,9 @@ def start_tunnel(cloudflared_path: str):
         text=True,
         bufsize=1,
     )
-    atexit.register(proc.terminate)  # don't leave the tunnel running after the server stops
+    atexit.register(
+        proc.terminate
+    )  # don't leave the tunnel running after the server stops
 
     found = {}
 
@@ -80,10 +85,11 @@ def print_qr(url: str):
     server down with it, so failures are swallowed, not raised."""
     try:
         import qrcode
+
         qr = qrcode.QRCode(border=1)
         qr.add_data(url)
         qr.print_ascii()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — deliberately broad: see docstring
         print(f"  (couldn't render QR code: {e})", flush=True)
 
 
@@ -96,22 +102,34 @@ if __name__ == "__main__":
     print_field("Local", f"http://localhost:{PORT}")
     print_field("Network", f"http://{ip}:{PORT}  (same Wi-Fi)")
     print_field("Docs", f"http://localhost:{PORT}/docs")
-    print_field("Collection", f"http://{ip}:{PORT}/collection  (browsing works fine over plain http/LAN)")
+    print_field(
+        "Collection",
+        f"http://{ip}:{PORT}/collection  (browsing works fine over plain http/LAN)",
+    )
     print(flush=True)
 
     cloudflared_path = find_cloudflared()
     if cloudflared_path:
-        print("  Starting HTTPS tunnel (only needed to scan barcodes — camera access requires it)...", flush=True)
+        print(
+            "  Starting HTTPS tunnel (only needed to scan barcodes — camera access requires it)...",
+            flush=True,
+        )
         tunnel_url = start_tunnel(cloudflared_path)
         if tunnel_url:
             print_field("Phone", tunnel_url)
             print(flush=True)
             print_qr(tunnel_url)
         else:
-            print("  Tunnel didn't come up in time — run it manually in another terminal:", flush=True)
+            print(
+                "  Tunnel didn't come up in time — run it manually in another terminal:",
+                flush=True,
+            )
             print(f"    cloudflared tunnel --url http://localhost:{PORT}", flush=True)
     else:
-        print("  cloudflared not found — install it for one-command phone testing, or run", flush=True)
+        print(
+            "  cloudflared not found — install it for one-command phone testing, or run",
+            flush=True,
+        )
         print("  manually in another terminal:", flush=True)
         print(f"    cloudflared tunnel --url http://localhost:{PORT}", flush=True)
     print(flush=True)
