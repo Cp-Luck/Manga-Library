@@ -102,9 +102,15 @@ in testing — cloudflared avoided both problems and needs no signup at all.)
    Decisions](#engineering-decisions)), and attached automatically as
    part of step 1. If it didn't, the volume is still added, just without one.
 4. Browse the result at `/collection` — a cover-art grid, grouped by
-   series. Click a series to see its volumes, then click a volume to fix
-   its number, move it to a different series, attach a cover by hand, or
-   remove it.
+   series. Click a series to see its volumes:
+
+   ![Series drill-down — clicking a series shows every volume owned](docs/series-drilldown-screenshot.jpg)
+
+   then click a volume to fix its number, move it to a different series,
+   attach a cover by hand, or remove it:
+
+   ![Editing a volume — series/number correction and manual cover upload](docs/edit-volume-screenshot.jpg)
+
 5. No barcode to scan at all? "+ Add manually" on `/collection` adds a
    volume directly (`POST /volumes`) — series, volume number, author, and
    ISBN are all optional except the series name.
