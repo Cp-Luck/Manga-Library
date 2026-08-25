@@ -4,6 +4,11 @@ A personal FastAPI backend for tracking a physical manga collection: scan a
 barcode to log a volume, browse the result as a cover-art grid. Cover images
 come straight from Google Books — there's no camera-based cover scanning.
 
+![Collection view — cover-art grid grouped by series](docs/collection-screenshot.jpg)
+
+*The `/collection` page, screenshotted straight from a running instance —
+this is my actual collection (133 volumes, 31 series), not placeholder data.*
+
 ## Setup
 
 ```bash
@@ -145,9 +150,9 @@ directory — never `manga.db` or `covers/`, which hold my actual collection.
 ## Results
 
 Numbers from my own collection as of this writing, pulled directly from
-`manga.db`/`scan_log.jsonl`:
+`manga.db`/`scan_log.jsonl` (same data the screenshot above shows):
 
-- 133 volumes tracked across 33 series
+- 133 volumes tracked across 31 series
 - 126 of those volumes have a cover image attached automatically from
   Google Books
 - 194 scan events logged since I started using it
