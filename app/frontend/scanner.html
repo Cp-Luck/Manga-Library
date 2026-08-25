@@ -38,7 +38,6 @@ no cover for an ISBN, the volume is just added without one.
 
   let stream = null;
   let stopScanning = false;
-  let lastResult = null;
 
   async function startCamera() {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -130,7 +129,6 @@ no cover for an ISBN, the volume is just added without one.
 
   function onBarcodeDetected(isbn) {
     stopScanning = true;
-    lastResult = isbn;
     status.textContent = `Found ISBN: ${isbn} — looking up...`;
     flashDetected();
     scanAgainBtn.style.display = "block"; // shown immediately — a misread barcode needs to be interruptible before the lookup even finishes

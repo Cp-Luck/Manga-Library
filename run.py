@@ -116,4 +116,4 @@ if __name__ == "__main__":
         print(f"    cloudflared tunnel --url http://localhost:{PORT}", flush=True)
     print(flush=True)
 
-    uvicorn.run("app.main:app", host=HOST, port=PORT, reload=True)
+    uvicorn.run("app.backend.main:app", host=HOST, port=PORT, reload=True)

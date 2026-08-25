@@ -22,9 +22,10 @@ is gitignored — never commit it.
 python run.py
 ```
 
-(Equivalent to `python -m uvicorn app.main:app --reload --host 0.0.0.0 --port
-8000` — `run.py` just avoids retyping that, and sidesteps PATH issues on
-systems where pip installs scripts somewhere your shell doesn't look.)
+(Equivalent to `python -m uvicorn app.backend.main:app --reload --host
+0.0.0.0 --port 8000` — `run.py` just avoids retyping that, and sidesteps
+PATH issues on systems where pip installs scripts somewhere your shell
+doesn't look.)
 
 The database (`manga.db`) is created automatically from `schema.sql` on
 first startup.
@@ -69,7 +70,12 @@ testing — cloudflared avoided both problems and needs no signup at all.)
    attached automatically as part of step 1 — nothing else to do. If it
    didn't, the volume is still added, just without one.
 4. Browse the result at `/collection` — a cover-art grid, grouped by
-   series. Click any cover to remove that volume from the library.
+   series. Click a series to see its volumes, then click a volume to fix
+   its number, move it to a different series, attach a cover by hand, or
+   remove it.
+5. No barcode to scan at all? "+ Add manually" on `/collection` adds a
+   volume directly (`POST /volumes`) — series, volume number, author, and
+   ISBN are all optional except the series name.
 
 ## Scan log
 
@@ -85,7 +91,10 @@ below.
 | Method | Path                          | Purpose                                              |
 |--------|-------------------------------|-------------------------------------------------------|
 | POST   | `/scan/isbn`                  | Look up/register a volume from a scanned ISBN, auto-fetching its cover |
+| POST   | `/volumes`                    | Add a volume by hand — no barcode/lookup involved      |
 | DELETE | `/volumes/{id}`               | Remove a volume (undo a scan, or a deliberate removal from `/collection`) |
+| PATCH  | `/volumes/{id}`                | Correct a volume's number, or move it to a different series |
+| POST   | `/volumes/{id}/cover`         | Manually attach a cover image                          |
 | GET    | `/library`                    | Full collection, grouped by series                     |
 | GET    | `/series`                     | List all series                                        |
 | GET    | `/series/{series_id}/volumes` | Volumes belonging to one series                         |
@@ -95,21 +104,26 @@ below.
 
 ```
 Manga Library/
-├── run.py              entry point — start with `python run.py`
+├── run.py                  entry point — start with `python run.py`
 ├── requirements.txt
-├── .env.example        template for GOOGLE_BOOKS_API_KEY; copy to .env
-├── app/                 all source code (a Python package)
-│   ├── main.py          FastAPI app, all routes
-│   ├── db.py             SQLite data access layer
-│   ├── schema.sql         database schema (series, volumes)
-│   ├── scanner.html        barcode scanner + confirm UI, served at "/"
-│   └── collection.html      cover-art grid browser, served at "/collection"
+├── .env.example            template for GOOGLE_BOOKS_API_KEY; copy to .env
+├── app/                     all source code (a Python package)
+│   ├── backend/              FastAPI app (a Python package)
+│   │   ├── main.py            app setup + routes (wiring only)
+│   │   ├── models.py           Pydantic request/response schemas
+│   │   ├── covers.py            cover storage, Google Books fetch, manual upload
+│   │   ├── titles.py             title → (series, volume number) parsing
+│   │   ├── db.py                 SQLite data access layer
+│   │   └── schema.sql             database schema (series, volumes)
+│   └── frontend/              static pages, served by the backend
+│       ├── scanner.html         barcode scanner + confirm UI, served at "/"
+│       └── collection.html      cover-art grid browser, served at "/collection"
 └── (gitignored runtime data, created automatically — see below)
 ```
 
-`app/` holds only source code; `run.py` imports it as `app.main:app`. Runtime
-data lives at the project root instead of inside `app/`, so it stays put and
-easy to find regardless of how the source is organized internally.
+`app/` holds only source code; `run.py` imports it as `app.backend.main:app`.
+Runtime data lives at the project root instead of inside `app/`, so it stays
+put and easy to find regardless of how the source is organized internally.
 
 Gitignored runtime data (created automatically, never committed):
 `.env`, `manga.db`, `scan_log.jsonl`, `covers/`
@@ -117,11 +131,12 @@ Gitignored runtime data (created automatically, never committed):
 ## Known gaps / next steps
 
 - No auth — fine for personal/local use, not for anything public-facing
-- No way to identify a volume without its barcode (no cover-matching
-  feature) — if the barcode's unreadable or missing, there's currently no
-  fallback besides adding it by ISBN manually via `/docs`
-- Series/volume-number parsing from the Google Books title (`_parse_title`
-  in `main.py`) is a best-effort regex, not guaranteed — publishers format
+- No way to *identify* an unknown volume without its barcode (no
+  cover-matching feature) — if the barcode's unreadable/missing and you
+  don't already know what the book is, "+ Add manually" on `/collection`
+  still requires you to type in the series/volume yourself
+- Series/volume-number parsing from the Google Books title (`parse_title`
+  in `app/backend/titles.py`) is a best-effort regex, not guaranteed — publishers format
   titles inconsistently ("Series, Vol. 4" vs "Series 04 (Manga)" vs "Series.
   2" have all shown up for real). Worth a periodic sanity check on
   `/library` for series that should be merged but aren't

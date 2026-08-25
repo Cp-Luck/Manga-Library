@@ -3,18 +3,23 @@ Collection browser — grid view of the library, grouped by series.
 Dark, dense card grid modeled after the user's reference (MangaUpdates-style
 library view: dark bg, cover-dominant cards, corner badge, title underneath).
 Fetches GET /library (each volume already carries a cover_url, computed
-server-side from the stored filesystem path — see _cover_url() in main.py).
+server-side from the stored filesystem path — see cover_url() in covers.py).
 
 Clicking a cover opens an edit panel: fix the volume number, move it to a
 different (or brand new) series, or attach a cover image by hand — for the
 cases Google Books' API doesn't cover cleanly (an inconsistent/incomplete
 title, a missing volume number, no cover art) — or remove the volume outright.
+
+"+ Add manually" opens a separate modal to add a volume with no barcode
+involved at all (POST /volumes) — for a book with no barcode, a damaged
+one, or one Google Books just doesn't have a record for.
 -->
 <div id="collection-root">
   <div id="collection-nav"><a href="/">📷 Scan</a><span class="current">📚 Collection</span></div>
   <div id="collection-toolbar">
     <span id="collection-count"></span>
     <input id="search-box" type="search" placeholder="Filter by series or author..." />
+    <button id="add-manual-btn" class="add-manual-btn">+ Add manually</button>
   </div>
   <div id="collection-status"></div>
   <div id="series-list"></div>
@@ -54,6 +59,49 @@ title, a missing volume number, no cover art) — or remove the volume outright.
   </div>
 </div>
 
+<div id="series-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-panel series-modal-panel">
+    <button id="series-modal-close" class="modal-close" aria-label="Close">✕</button>
+    <h3 id="series-modal-title"></h3>
+    <div id="series-modal-meta" class="series-meta"></div>
+    <div id="series-modal-grid" class="volume-grid"></div>
+  </div>
+</div>
+
+<div id="add-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-panel">
+    <button id="add-modal-close" class="modal-close" aria-label="Close">✕</button>
+    <h3>Add a volume manually</h3>
+    <div class="modal-field-hint" style="margin-bottom: 14px;">For a book with no barcode, a damaged one, or one Google Books just doesn't have a record for. No cover comes with it — add one afterward by clicking the new card.</div>
+
+    <label class="modal-field">
+      Series
+      <input id="add-series-input" type="text" list="series-datalist" placeholder="Series name" />
+    </label>
+
+    <label class="modal-field">
+      Volume number
+      <input id="add-volume-input" type="number" inputmode="numeric" placeholder="e.g. 4" />
+    </label>
+
+    <label class="modal-field">
+      Author <span class="modal-field-hint">(optional)</span>
+      <input id="add-author-input" type="text" placeholder="Author name" />
+    </label>
+
+    <label class="modal-field">
+      ISBN <span class="modal-field-hint">(optional)</span>
+      <input id="add-isbn-input" type="text" inputmode="numeric" placeholder="e.g. 9781234567890" />
+    </label>
+
+    <div id="add-message" class="modal-message"></div>
+
+    <div class="modal-actions">
+      <button id="add-save-btn" class="modal-save-btn">Add</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   const API_BASE = window.location.origin;
@@ -76,18 +124,70 @@ title, a missing volume number, no cover art) — or remove the volume outright.
   const modalSaveBtn = document.getElementById("modal-save-btn");
   const modalRemoveBtn = document.getElementById("modal-remove-btn");
 
+  const seriesModal = document.getElementById("series-modal");
+  const seriesModalClose = document.getElementById("series-modal-close");
+  const seriesModalTitle = document.getElementById("series-modal-title");
+  const seriesModalMeta = document.getElementById("series-modal-meta");
+  const seriesModalGrid = document.getElementById("series-modal-grid");
+
+  const addManualBtn = document.getElementById("add-manual-btn");
+  const addModal = document.getElementById("add-modal");
+  const addModalClose = document.getElementById("add-modal-close");
+  const addSeriesInput = document.getElementById("add-series-input");
+  const addVolumeInput = document.getElementById("add-volume-input");
+  const addAuthorInput = document.getElementById("add-author-input");
+  const addIsbnInput = document.getElementById("add-isbn-input");
+  const addMessage = document.getElementById("add-message");
+  const addSaveBtn = document.getElementById("add-save-btn");
+
   let allVolumes = [];
   let editingVolume = null;
+  let openSeriesId = null;
 
   function groupBySeries(volumes) {
     const groups = new Map();
     for (const v of volumes) {
       if (!groups.has(v.series_id)) {
-        groups.set(v.series_id, { title: v.series_title, author: v.author, volumes: [] });
+        groups.set(v.series_id, { id: v.series_id, title: v.series_title, author: v.author, volumes: [] });
       }
       groups.get(v.series_id).volumes.push(v);
     }
     return [...groups.values()];
+  }
+
+  function openSeriesModal(group) {
+    openSeriesId = group.id;
+    renderSeriesModal(group);
+    seriesModal.style.display = "flex";
+  }
+
+  function renderSeriesModal(group) {
+    seriesModalTitle.textContent = group.title;
+    seriesModalMeta.textContent = `${group.volumes.length} vol.${group.author ? " · " + group.author : ""}`;
+    seriesModalGrid.innerHTML = "";
+    sortedVolumes(group).forEach(v => seriesModalGrid.appendChild(volumeCard(v)));
+  }
+
+  function closeSeriesModal() {
+    seriesModal.style.display = "none";
+    openSeriesId = null;
+  }
+
+  seriesModalClose.addEventListener("click", closeSeriesModal);
+  seriesModal.addEventListener("click", (e) => {
+    if (e.target === seriesModal) closeSeriesModal(); // backdrop click
+  });
+
+  // Keeps an open series modal in sync after an edit/remove/move elsewhere
+  // changes what belongs to it — called at the end of load().
+  function refreshOpenSeriesModal() {
+    if (openSeriesId === null) return;
+    const group = groupBySeries(allVolumes).find(g => g.id === openSeriesId);
+    if (!group) {
+      closeSeriesModal(); // series emptied out or got merged away entirely
+      return;
+    }
+    renderSeriesModal(group);
   }
 
   function volumeCard(v) {
@@ -222,31 +322,121 @@ title, a missing volume number, no cover art) — or remove the volume outright.
     }
   }
 
-  function seriesSection(group) {
-    const section = document.createElement("section");
-    section.className = "series-section";
+  // --- Add manually (no barcode/lookup involved — POST /volumes) ---
 
-    const header = document.createElement("div");
-    header.className = "series-header";
-    header.innerHTML = `<h2>${escapeHtml(group.title)}</h2>` +
-      `<span class="series-meta">${group.volumes.length} vol.${group.author ? " · " + escapeHtml(group.author) : ""}</span>`;
-    section.appendChild(header);
+  function openAddModal() {
+    addSeriesInput.value = "";
+    addVolumeInput.value = "";
+    addAuthorInput.value = "";
+    addIsbnInput.value = "";
+    addMessage.textContent = "";
+    addModal.style.display = "flex";
+    addSeriesInput.focus();
+  }
 
-    const grid = document.createElement("div");
-    grid.className = "volume-grid";
-    group.volumes
-      .slice()
-      .sort((a, b) => (a.volume_number ?? 999) - (b.volume_number ?? 999))
-      .forEach(v => grid.appendChild(volumeCard(v)));
-    section.appendChild(grid);
+  function closeAddModal() {
+    addModal.style.display = "none";
+  }
 
-    return section;
+  addManualBtn.addEventListener("click", openAddModal);
+  addModalClose.addEventListener("click", closeAddModal);
+  addModal.addEventListener("click", (e) => {
+    if (e.target === addModal) closeAddModal(); // backdrop click
+  });
+
+  addSaveBtn.addEventListener("click", async () => {
+    const seriesTitle = addSeriesInput.value.trim();
+    if (!seriesTitle) {
+      addMessage.textContent = "Series name is required.";
+      return;
+    }
+
+    const raw = addVolumeInput.value.trim();
+    const payload = {
+      series_title: seriesTitle,
+      volume_number: raw === "" ? null : parseInt(raw, 10),
+      author: addAuthorInput.value.trim() || null,
+      isbn: addIsbnInput.value.trim() || null,
+    };
+
+    addSaveBtn.disabled = true;
+    addMessage.textContent = "Adding...";
+    try {
+      const res = await fetch(`${API_BASE}/volumes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Add failed (${res.status})`);
+      }
+      const newVolume = await res.json();
+
+      closeAddModal();
+      await load();
+      // No cover comes with a manual add — open the edit panel right away
+      // so a cover can be attached in the same flow, if the user has one.
+      openEditModal({ ...newVolume, cover_url: null });
+    } catch (err) {
+      addMessage.textContent = err.message || "Failed to add — check connection and try again.";
+      console.error(err);
+    } finally {
+      addSaveBtn.disabled = false;
+    }
+  });
+
+  function sortedVolumes(group) {
+    return group.volumes.slice().sort((a, b) => (a.volume_number ?? 999) - (b.volume_number ?? 999));
+  }
+
+  // Every series condenses into one card — its first volume's cover as the
+  // representative image, a badge showing the volume count. Click opens an
+  // overlay with the full per-volume grid (see openSeriesModal).
+  function seriesCard(group) {
+    const card = document.createElement("div");
+    card.className = "volume-card series-card";
+    card.title = "Click to view volumes";
+
+    const first = sortedVolumes(group)[0];
+    if (first.cover_url) {
+      const img = document.createElement("img");
+      img.src = first.cover_url;
+      img.alt = group.title;
+      img.loading = "lazy";
+      card.appendChild(img);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.className = "cover-placeholder";
+      placeholder.textContent = "No cover yet";
+      card.appendChild(placeholder);
+    }
+
+    const badge = document.createElement("div");
+    badge.className = "volume-badge";
+    badge.textContent = group.volumes.length;
+    card.appendChild(badge);
+
+    const caption = document.createElement("div");
+    caption.className = "series-card-caption";
+    caption.innerHTML = `${escapeHtml(group.title)}` +
+      (group.author ? `<span class="author">${escapeHtml(group.author)}</span>` : "");
+    card.appendChild(caption);
+
+    card.addEventListener("click", () => openSeriesModal(group));
+
+    return card;
   }
 
   function escapeHtml(s) {
     const div = document.createElement("div");
     div.textContent = s ?? "";
     return div.innerHTML;
+  }
+
+  // "The Case Study of Vanitas" alphabetizes under C, not T.
+  function sortKey(title) {
+    return title.replace(/^(a|an|the)\s+/i, "");
   }
 
   function render(volumes) {
@@ -259,8 +449,8 @@ title, a missing volume number, no cover art) — or remove the volume outright.
     }
     status.textContent = "";
     groupBySeries(volumes)
-      .sort((a, b) => a.title.localeCompare(b.title))
-      .forEach(group => seriesList.appendChild(seriesSection(group)));
+      .sort((a, b) => sortKey(a.title).localeCompare(sortKey(b.title)))
+      .forEach(group => seriesList.appendChild(seriesCard(group)));
   }
 
   function updateCount() {
@@ -305,6 +495,7 @@ title, a missing volume number, no cover art) — or remove the volume outright.
       updateCount();
       render(allVolumes);
       loadSeriesDatalist(); // keep autocomplete in sync with any series added/merged
+      refreshOpenSeriesModal();
     } catch (err) {
       status.textContent = "Failed to load library — check the backend is running.";
       console.error(err);
@@ -344,12 +535,16 @@ title, a missing volume number, no cover art) — or remove the volume outright.
   #search-box::placeholder { color: var(--text-muted); }
   #search-box:focus { outline: none; border-color: var(--accent); }
 
+  .add-manual-btn {
+    padding: 8px 14px; font-size: 14px; font-weight: 600; white-space: nowrap;
+    color: #0a0a0a; background: var(--accent); border: none; border-radius: 6px; cursor: pointer;
+  }
+
   #collection-status { font-size: 14px; color: var(--text-muted); padding: 8px 0; }
 
-  .series-section { margin-bottom: 32px; }
-  .series-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-  .series-header h2 { font-size: 16px; margin: 0; font-weight: 600; color: var(--text); }
-  .series-meta { font-size: 12px; color: var(--text-muted); }
+  #series-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 14px; }
+
+  .series-meta { font-size: 12px; color: var(--text-muted); margin-bottom: 14px; }
 
   .volume-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 14px; }
 
@@ -373,16 +568,28 @@ title, a missing volume number, no cover art) — or remove the volume outright.
     padding: 2px 7px; border-radius: 10px; line-height: 1.4;
   }
 
+  .series-card-caption {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 8px 6px;
+    background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0));
+    color: #fff; font-size: 12px; font-weight: 600; line-height: 1.3;
+  }
+  .series-card-caption .author { display: block; font-size: 10px; font-weight: 400; color: #ccc; margin-top: 2px; }
+
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.7);
     display: flex; align-items: center; justify-content: center;
     padding: 16px; z-index: 100;
   }
+  /* Editing a single volume can be opened from inside the series overlay
+     (clicking a cover in its grid) — it must paint above it, not behind. */
+  #edit-modal { z-index: 110; }
   .modal-panel {
     position: relative; background: var(--bg-card); border: 1px solid var(--border);
     border-radius: 10px; padding: 20px; width: 100%; max-width: 340px;
     max-height: 90vh; overflow-y: auto; box-sizing: border-box;
   }
+  .series-modal-panel { max-width: 900px; }
+  #series-modal-title { font-size: 17px; margin: 0 0 4px; font-weight: 600; padding-right: 20px; }
   .modal-close {
     position: absolute; top: 10px; right: 10px; background: none; border: none;
     color: var(--text-muted); font-size: 16px; cursor: pointer; line-height: 1; padding: 4px;

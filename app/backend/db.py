@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 
-DB_PATH = Path(__file__).parent.parent / "manga.db"  # project root, not inside app/
+DB_PATH = Path(__file__).parent.parent.parent / "manga.db"  # project root, not inside app/backend/
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
@@ -115,10 +115,14 @@ def delete_series(series_id):
 
 def get_volume_by_isbn(isbn):
     """Primary lookup path — used right after a barcode scan to check
-    if this exact volume is already in the collection."""
+    if this exact volume is already in the collection. Joined with series
+    so the caller gets series_title for free instead of a second query."""
     with get_connection() as conn:
         return conn.execute(
-            "SELECT * FROM volumes WHERE isbn = ?", (isbn,)
+            """SELECT volumes.*, series.title AS series_title
+               FROM volumes JOIN series ON volumes.series_id = series.id
+               WHERE volumes.isbn = ?""",
+            (isbn,),
         ).fetchone()
 
 
