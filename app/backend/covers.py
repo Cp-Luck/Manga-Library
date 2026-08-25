@@ -1,23 +1,36 @@
 """
 Cover image handling: where they're stored, how they get fetched from
-Google Books, and how a manually uploaded one gets saved. No image
-processing happens here — every cover, whether from Google or a manual
-upload, is written to disk exactly as received. (An earlier version of this
-app rectified/embedded photos taken with a phone camera; that whole pipeline
-— OpenCV, CLIP, FAISS — was removed once auto-fetching from Google Books
-made it unnecessary.)
+Google Books, and how a manually uploaded one gets saved. The original
+bytes are written to disk unchanged (no re-encoding/resizing) — the only
+processing is validating that what came in is actually a decodable image
+of a format we're willing to serve, and picking the file extension to
+match. (An earlier version of this app rectified/embedded photos taken
+with a phone camera; that whole pipeline — OpenCV, CLIP, FAISS — was
+removed once auto-fetching from Google Books made it unnecessary.)
 """
+import io
 import uuid
 from pathlib import Path
 from typing import Optional
 
 import httpx
+from PIL import Image, UnidentifiedImageError
 
 from . import db
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/backend/covers.py -> project root
 COVERS_DIR = PROJECT_ROOT / "covers"
 COVERS_DIR.mkdir(exist_ok=True)
+
+# Generous for a book cover (real ones are well under 1MB) while still
+# bounding the worst case for a manual upload or a misbehaving remote host.
+MAX_COVER_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Formats we're willing to serve, mapped to the extension saved on disk.
+# Deliberately not "whatever Pillow can decode" — e.g. BMP/TIFF are real
+# images Pillow would happily verify, but aren't formats we want turning up
+# as a manga cover.
+ALLOWED_COVER_FORMATS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif"}
 
 
 def cover_url(cover_image_path):
@@ -28,15 +41,38 @@ def cover_url(cover_image_path):
     return f"/covers/{Path(cover_image_path).name}"
 
 
-def save_cover(volume_id: int, image_bytes: bytes) -> Optional[str]:
-    """Saves a cover image (fetched from Google Books, or manually uploaded
-    from the collection page) and links it to the volume. Returns the saved
-    filesystem path on success, or None if there's nothing usable to save —
-    callers use the path directly rather than re-querying the DB for it."""
-    if not image_bytes:
+def _detect_cover_extension(image_bytes: bytes) -> Optional[str]:
+    """Returns the file extension for image_bytes' real format, or None if
+    it's oversized, not a genuine image, or a format we don't serve. Never
+    trusts a filename or a client-supplied Content-Type — both are just
+    labels the uploader chose, not a guarantee about what the bytes are."""
+    if not image_bytes or len(image_bytes) > MAX_COVER_UPLOAD_BYTES:
         return None
 
-    cover_filename = f"{uuid.uuid4().hex}.jpg"
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.verify()  # parses structure without fully decoding pixels
+        # Pillow's docs say the file object shouldn't be reused after
+        # verify() — re-open to read the now-trusted format.
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            image_format = img.format
+    except (UnidentifiedImageError, OSError):
+        return None
+
+    return ALLOWED_COVER_FORMATS.get(image_format)
+
+
+def save_cover(volume_id: int, image_bytes: bytes) -> Optional[str]:
+    """Validates and saves a cover image (fetched from Google Books, or
+    manually uploaded from the collection page) and links it to the volume.
+    Returns the saved filesystem path on success, or None if image_bytes
+    isn't a genuine, supported, size-bounded image — callers use the path
+    directly rather than re-querying the DB for it."""
+    extension = _detect_cover_extension(image_bytes)
+    if extension is None:
+        return None
+
+    cover_filename = f"{uuid.uuid4().hex}{extension}"
     cover_path = COVERS_DIR / cover_filename
     cover_path.write_bytes(image_bytes)
 

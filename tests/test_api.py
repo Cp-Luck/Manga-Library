@@ -6,7 +6,20 @@ Google Books lookups are faked via FakeAsyncClient rather than hitting the
 real network — tests should be deterministic and not depend on external
 availability or your API quota.
 """
-from app.backend import main as main_module
+import io
+
+from PIL import Image
+
+from app.backend import covers, main as main_module
+
+
+def _make_test_image_bytes(image_format: str) -> bytes:
+    """A genuine, minimal, decodable image in the given format — for
+    exercising real Pillow validation rather than a fake byte string that
+    only *looks* like an image header."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (2, 2), color=(200, 50, 50)).save(buffer, format=image_format)
+    return buffer.getvalue()
 
 
 class _FakeResponse:
@@ -197,12 +210,53 @@ def test_upload_cover_for_existing_volume(client):
 
     resp = client.post(
         f"/volumes/{volume_id}/cover",
-        files={"file": ("cover.jpg", b"\xff\xd8\xff\xe0fakejpegbytes", "image/jpeg")},
+        files={"file": ("cover.jpg", _make_test_image_bytes("JPEG"), "image/jpeg")},
     )
 
     assert resp.status_code == 200
     assert resp.json()["volume_id"] == volume_id
     assert resp.json()["cover_url"].startswith("/covers/")
+    assert resp.json()["cover_url"].endswith(".jpg")
+
+
+def test_upload_cover_saves_with_extension_matching_real_format_not_filename(client):
+    # Upload a genuine PNG named "cover.jpg" — the saved extension should
+    # reflect the real decoded format (PNG), not the filename's claim.
+    add_resp = client.post("/volumes", json={"series_title": "Mushishi", "volume_number": 1})
+    volume_id = add_resp.json()["id"]
+
+    resp = client.post(
+        f"/volumes/{volume_id}/cover",
+        files={"file": ("cover.jpg", _make_test_image_bytes("PNG"), "image/jpeg")},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["cover_url"].endswith(".png")
+
+
+def test_upload_cover_rejects_non_image_bytes(client):
+    add_resp = client.post("/volumes", json={"series_title": "Naruto", "volume_number": 1})
+    volume_id = add_resp.json()["id"]
+
+    resp = client.post(
+        f"/volumes/{volume_id}/cover",
+        files={"file": ("cover.jpg", b"not actually an image, just text pretending to be one", "image/jpeg")},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_upload_cover_rejects_oversized_file(client):
+    add_resp = client.post("/volumes", json={"series_title": "Bleach", "volume_number": 1})
+    volume_id = add_resp.json()["id"]
+
+    oversized = b"\x00" * (covers.MAX_COVER_UPLOAD_BYTES + 1)
+    resp = client.post(
+        f"/volumes/{volume_id}/cover",
+        files={"file": ("cover.jpg", oversized, "image/jpeg")},
+    )
+
+    assert resp.status_code == 400
 
 
 def test_upload_cover_returns_404_for_missing_volume(client):

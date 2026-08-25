@@ -1,5 +1,9 @@
 """Tests for the db.py data-access layer. Every test gets its own throwaway
 SQLite file via the temp_db fixture — never the real manga.db."""
+import sqlite3
+
+import pytest
+
 from app.backend import db
 
 
@@ -19,6 +23,69 @@ def test_get_or_create_series_is_case_insensitive(temp_db):
 
     assert lower_id == upper_id
     assert len(db.list_series()) == 1
+
+
+def test_series_title_unique_index_rejects_duplicate_insert(temp_db):
+    """Proves the dedup is enforced by the database itself
+    (idx_series_title_unique in schema.sql), not just by
+    get_or_create_series's own SELECT-before-INSERT check."""
+    db.get_or_create_series("Duplicate Series")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO series (title, author) VALUES (?, ?)",
+                ("duplicate series", None),  # different case, same title
+            )
+
+
+def test_get_or_create_series_handles_lost_race_gracefully(temp_db, monkeypatch):
+    """Simulates two concurrent requests both creating "Race Series": one
+    commits first (the "winner", created directly here); the other's own
+    SELECT is forced to report "not found" anyway (as if it ran a moment
+    earlier, before the winner's commit), so its INSERT proceeds and hits
+    the real unique index. That should be caught and resolved to the
+    winner's id, not raised as an unhandled IntegrityError.
+
+    sqlite3.Connection is a C type and won't allow patching its methods
+    directly ("immutable type"), so this intercepts one layer up, at
+    sqlite3.connect, wrapping the real connection in a thin proxy that
+    fakes exactly one call and forwards everything else untouched."""
+    winner_id = db.get_or_create_series("Race Series")
+
+    real_connect = sqlite3.connect
+    faked_once = {"done": False}
+
+    class _EmptyResult:
+        def fetchone(self):
+            return None
+
+    class _InterceptingConnection:
+        def __init__(self, real_conn):
+            object.__setattr__(self, "_real_conn", real_conn)
+
+        def execute(self, sql, params=()):
+            is_series_lookup = sql.strip().upper().startswith("SELECT ID FROM SERIES")
+            if is_series_lookup and not faked_once["done"]:
+                faked_once["done"] = True
+                return _EmptyResult()
+            return self._real_conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._real_conn, name)
+
+        def __setattr__(self, name, value):
+            setattr(self._real_conn, name, value)
+
+    def fake_connect(*args, **kwargs):
+        return _InterceptingConnection(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", fake_connect)
+
+    result_id = db.get_or_create_series("Race Series")
+
+    assert result_id == winner_id
+    assert len(db.list_series()) == 1  # no duplicate got created
 
 
 def test_add_volume_and_get_by_isbn(temp_db):

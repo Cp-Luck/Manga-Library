@@ -39,7 +39,14 @@ def get_or_create_series(title, author=None):
     different scans (Google Books, manual entry, etc). Case-insensitive —
     Google Books itself isn't consistent about it (e.g. "FAIRY TAIL: 100
     Years Quest" vs "Fairy Tail: 100 Years Quest" across different ISBNs of
-    the same real series), so an exact match would fragment those apart."""
+    the same real series), so an exact match would fragment those apart.
+
+    The SELECT-then-INSERT below is a check-then-act race in theory: two
+    concurrent requests for a brand-new title could both pass the SELECT
+    before either INSERT commits. idx_series_title_unique (schema.sql) is
+    what actually prevents the duplicate at the database level; the
+    IntegrityError handler here just means the loser of that race returns
+    the winner's id instead of a 500."""
     with get_connection() as conn:
         row = conn.execute(
             "SELECT id FROM series WHERE title = ? COLLATE NOCASE", (title,)
@@ -47,10 +54,16 @@ def get_or_create_series(title, author=None):
         if row:
             return row["id"]
 
-        cursor = conn.execute(
-            "INSERT INTO series (title, author) VALUES (?, ?)", (title, author)
-        )
-        return cursor.lastrowid
+        try:
+            cursor = conn.execute(
+                "INSERT INTO series (title, author) VALUES (?, ?)", (title, author)
+            )
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            existing = conn.execute(
+                "SELECT id FROM series WHERE title = ? COLLATE NOCASE", (title,)
+            ).fetchone()
+            return existing["id"]
 
 
 def list_series():

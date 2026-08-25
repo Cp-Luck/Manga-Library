@@ -27,3 +27,23 @@ CREATE INDEX IF NOT EXISTS idx_volumes_isbn ON volumes(isbn);
 
 -- Fast "all volumes for this series" queries (for the shelf/browse view)
 CREATE INDEX IF NOT EXISTS idx_volumes_series ON volumes(series_id);
+
+-- Enforces get_or_create_series()'s case-insensitive dedup at the database
+-- level, not just in application code: two concurrent requests creating the
+-- same new series can both pass the app-level "does it exist?" check before
+-- either INSERT commits (classic check-then-act race). Without this, that
+-- race could create two series rows for the same title. A UNIQUE INDEX
+-- achieves the same enforcement as a UNIQUE column constraint would, without
+-- needing to recreate the table (SQLite can't ALTER TABLE to add a column
+-- constraint after the fact) — safe to add to an existing database with
+-- rows already in it, as long as no case-insensitive duplicates exist yet
+-- (verified against the live database before this was added).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_series_title_unique ON series(title COLLATE NOCASE);
+
+-- Migration note: this project has no formal migration framework (e.g.
+-- Alembic) — schema changes ship as additive, idempotent CREATE TABLE/INDEX
+-- IF NOT EXISTS statements run on every startup (see db.init_db()). That's
+-- adequate for the additive changes made so far, but a genuinely destructive
+-- change (renaming/removing a column with existing data) would need a
+-- hand-written one-off migration script, since executescript() here can't
+-- express that safely.

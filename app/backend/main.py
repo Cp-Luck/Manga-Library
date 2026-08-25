@@ -268,7 +268,10 @@ async def upload_cover(volume_id: int, file: UploadFile = File(...)):
     image_bytes = await file.read()
     cover_path = save_cover(volume_id, image_bytes)
     if cover_path is None:
-        raise HTTPException(status_code=400, detail="Could not read that image")
+        raise HTTPException(
+            status_code=400,
+            detail="Could not save that file — it's too large, not a valid image, or not a supported format (JPEG/PNG/WEBP/GIF).",
+        )
     return {"volume_id": volume_id, "cover_url": cover_url(cover_path)}
 
 
