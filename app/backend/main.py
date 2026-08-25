@@ -24,7 +24,6 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -53,13 +52,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Manga Collection Tracker", lifespan=lifespan)
 
-# Allow the frontend (served from a different origin during dev) to call this API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten this to your actual frontend origin before shipping
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware needed: scanner.html and collection.html are served by
+# this same app and call the API via window.location.origin (see
+# API_BASE in both), so every request is same-origin — whether that's
+# localhost, a LAN IP, or the cloudflared tunnel URL. A wildcard CORS
+# policy here wouldn't protect anything real, since nothing cross-origin
+# ever calls this API from a browser.
 
 # Cover images are saved to disk with a filesystem path (see covers.py), but
 # the DB rows carry that raw path — meaningless to a browser. Serve the same

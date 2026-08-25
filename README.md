@@ -128,6 +128,51 @@ put and easy to find regardless of how the source is organized internally.
 Gitignored runtime data (created automatically, never committed):
 `.env`, `manga.db`, `scan_log.jsonl`, `covers/`
 
+## Testing
+
+```bash
+python -m pytest -q
+```
+
+36 tests: `title parsing` (the tricky Google Books title formats
+documented in `titles.py`'s own comments), the `db.py` data-access layer
+(series dedup, volume CRUD, series reassignment), and every API route
+through FastAPI's `TestClient`. Google Books calls are faked in the API
+tests rather than hit for real, so the suite is deterministic and doesn't
+burn API quota. Every test runs against a throwaway SQLite file and covers
+directory — never `manga.db` or `covers/`, which hold my actual collection.
+
+## Results
+
+Numbers from my own collection as of this writing, pulled directly from
+`manga.db`/`scan_log.jsonl`:
+
+- 133 volumes tracked across 33 series
+- 126 of those volumes have a cover image attached automatically from
+  Google Books
+- 194 scan events logged since I started using it
+
+## Engineering decisions
+
+The cover-art feature originally worked by taking a photo with a phone
+camera, then using OpenCV to rectify/deskew the shot and CLIP + FAISS to
+match it against a reference image index and identify the book. That
+pipeline worked, but it added a camera-calibration step, a vector index to
+keep in sync, and a failure mode ("no confident match") for every single
+scan — for a problem barcode scanning already solves outright once
+Google Books is doing the metadata lookup anyway. It was cut once the
+barcode + Google Books flow made it redundant; `schema.sql` still carries
+the now-unused `embedding_id` column rather than risk an `ALTER TABLE` on
+a database with real data in it.
+
+CORS also went through a similar correction: the backend used to run
+`CORSMiddleware` with `allow_origins=["*"]`, left over from treating the
+frontend as a separate origin during early development. Since
+`scanner.html`/`collection.html` are served by this same app and call the
+API via `window.location.origin`, every request — on localhost, a LAN IP,
+or the cloudflared tunnel — is actually same-origin. The middleware wasn't
+protecting anything; it's been removed rather than narrowed.
+
 ## Known gaps / next steps
 
 - No auth — fine for personal/local use, not for anything public-facing
@@ -140,5 +185,3 @@ Gitignored runtime data (created automatically, never committed):
   titles inconsistently ("Series, Vol. 4" vs "Series 04 (Manga)" vs "Series.
   2" have all shown up for real). Worth a periodic sanity check on
   `/library` for series that should be merged but aren't
-- CORS is wide open (`allow_origins=["*"]`) — tighten before deploying
-  anywhere it's reachable by more than you
