@@ -4,3 +4,4 @@ python-dotenv
 qrcode
 httpx
 python-multipart
+pytest
