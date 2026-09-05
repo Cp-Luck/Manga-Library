@@ -1,12 +1,12 @@
 """
 Manga collection tracker — FastAPI backend.
 
-Routes:
-  POST   /scan/isbn          — barcode was scanned client-side, look up metadata
-  POST   /volumes            — add a volume by hand, no barcode/lookup involved
-  DELETE /volumes/{id}       — remove a volume
-  PATCH  /volumes/{id}       — manually correct a volume's number or series
-  POST   /volumes/{id}/cover — manually attach a cover image
+Routes (🔒 = requires X-App-Secret header if APP_SECRET is set in .env):
+  POST   /scan/isbn          🔒 barcode was scanned client-side, look up metadata
+  POST   /volumes            🔒 add a volume by hand, no barcode/lookup involved
+  DELETE /volumes/{id}       🔒 remove a volume
+  PATCH  /volumes/{id}       🔒 manually correct a volume's number or series
+  POST   /volumes/{id}/cover 🔒 manually attach a cover image
   GET    /library            — full collection, grouped by series
   GET    /series/{id}        — one series and its volumes
   GET    /collection         — cover-art grid browser page
@@ -24,12 +24,18 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .covers import COVERS_DIR, cover_url, save_cover, try_fetch_cover_from_google
+from .covers import (
+    COVERS_DIR,
+    cover_file_path,
+    cover_url,
+    save_cover,
+    try_fetch_cover_from_google,
+)
 from .models import (
     IsbnScanRequest,
     ManualVolumeRequest,
@@ -50,6 +56,23 @@ load_dotenv(PROJECT_ROOT / ".env")  # never commit that file
 # and put it in .env as GOOGLE_BOOKS_API_KEY=... Lookups still work without
 # one, but will hit 429s.
 GOOGLE_BOOKS_API_KEY = os.environ.get("GOOGLE_BOOKS_API_KEY")
+
+# Optional — set APP_SECRET in .env to require it on every write (scan/add/
+# edit/delete/cover-upload). Read-only routes (/library, /series,
+# /collection, /) are never gated: the goal is "anyone with the tunnel URL
+# can look but not touch", not full login. Unset by default, so a fresh
+# clone behaves exactly as before this existed — see run.py's startup
+# banner for the reminder that writes are wide open until this is set.
+APP_SECRET = os.environ.get("APP_SECRET")
+
+
+async def require_write_access(x_app_secret: str | None = Header(default=None)):
+    if not APP_SECRET:
+        return
+    if x_app_secret != APP_SECRET:
+        raise HTTPException(
+            status_code=401, detail="Missing or incorrect X-App-Secret header"
+        )
 
 
 @asynccontextmanager
@@ -90,7 +113,11 @@ def scanner_page():
     return FileResponse(FRONTEND_DIR / "scanner.html")
 
 
-@app.post("/scan/isbn", response_model=VolumeResponse)
+@app.post(
+    "/scan/isbn",
+    response_model=VolumeResponse,
+    dependencies=[Depends(require_write_access)],
+)
 async def scan_isbn(payload: IsbnScanRequest):
     """Called right after the client-side barcode scanner decodes an ISBN.
     Checks if we already own it; if not, looks up metadata and creates it."""
@@ -176,7 +203,11 @@ async def scan_isbn(payload: IsbnScanRequest):
     )
 
 
-@app.post("/volumes", response_model=VolumeResponse)
+@app.post(
+    "/volumes",
+    response_model=VolumeResponse,
+    dependencies=[Depends(require_write_access)],
+)
 def add_volume_manually(payload: ManualVolumeRequest):
     """Adds a volume directly from the collection page's "Add manually"
     form, bypassing the Google Books lookup entirely — for a book with no
@@ -219,7 +250,7 @@ def add_volume_manually(payload: ManualVolumeRequest):
     )
 
 
-@app.delete("/volumes/{volume_id}")
+@app.delete("/volumes/{volume_id}", dependencies=[Depends(require_write_access)])
 def delete_volume(volume_id: int):
     """Removes a volume outright. Two callers today: the scanner's "Wrong
     manga" button (undoing a volume that same scan just created — a barcode
@@ -232,12 +263,12 @@ def delete_volume(volume_id: int):
     """
     volume = db.get_volume_by_id(volume_id)
     if volume and volume["cover_image_path"]:
-        Path(volume["cover_image_path"]).unlink(missing_ok=True)
+        cover_file_path(volume["cover_image_path"]).unlink(missing_ok=True)
     db.delete_volume(volume_id)
     return {"deleted": volume_id}
 
 
-@app.patch("/volumes/{volume_id}")
+@app.patch("/volumes/{volume_id}", dependencies=[Depends(require_write_access)])
 def update_volume(volume_id: int, payload: VolumeUpdateRequest):
     """Manual correction from the collection page — Google Books titles
     don't always carry a parseable volume number (see titles.parse_title),
@@ -276,7 +307,7 @@ def update_volume(volume_id: int, payload: VolumeUpdateRequest):
     }
 
 
-@app.post("/volumes/{volume_id}/cover")
+@app.post("/volumes/{volume_id}/cover", dependencies=[Depends(require_write_access)])
 async def upload_cover(volume_id: int, file: UploadFile = File(...)):
     """Manual cover upload from the collection page — for when Google Books
     had no cover art for that ISBN. Saves whatever image is given as-is, no

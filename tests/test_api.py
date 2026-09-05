@@ -11,7 +11,7 @@ import io
 
 from PIL import Image
 
-from app.backend import covers
+from app.backend import covers, db
 from app.backend import main as main_module
 
 
@@ -103,6 +103,36 @@ def test_delete_volume(client):
 
     library = client.get("/library").json()
     assert all(row["id"] != volume_id for row in library)
+
+
+def test_delete_volume_removes_cover_file_stored_as_legacy_windows_path(
+    client, temp_covers_dir
+):
+    """Simulates a volume whose cover_image_path predates the bare-filename
+    fix in covers.py — a full Windows-style path that isn't a valid path at
+    all on whatever OS happens to be running now (this app has run on both
+    Windows and Linux against the same database). DELETE must still find
+    and remove the real file via its filename, not the stale, OS-specific
+    directory prefix."""
+    add_resp = client.post(
+        "/volumes", json={"series_title": "Legacy Path Series", "volume_number": 1}
+    )
+    volume_id = add_resp.json()["id"]
+
+    real_filename = "legacycover123.jpg"
+    (temp_covers_dir / real_filename).write_bytes(b"fake jpeg bytes")
+    legacy_windows_path = f"C:\\Coding\\Manga Library\\covers\\{real_filename}"
+
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE volumes SET cover_image_path = ? WHERE id = ?",
+            (legacy_windows_path, volume_id),
+        )
+
+    delete_resp = client.delete(f"/volumes/{volume_id}")
+
+    assert delete_resp.status_code == 200
+    assert not (temp_covers_dir / real_filename).exists()
 
 
 # --- PATCH /volumes/{id} ---

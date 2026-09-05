@@ -1,14 +1,21 @@
 """Start the backend: python run.py"""
 
 import atexit
+import os
 import re
 import shutil
 import socket
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv(
+    Path(__file__).parent / ".env"
+)  # just to check APP_SECRET for the banner below
 
 # Windows consoles often default to cp1252, which can't encode the em dashes
 # in these messages or the block characters the QR code prints — force UTF-8
@@ -106,6 +113,11 @@ if __name__ == "__main__":
         "Collection",
         f"http://{ip}:{PORT}/collection  (browsing works fine over plain http/LAN)",
     )
+    if os.environ.get("APP_SECRET"):
+        print_field("Write auth", "ON — scan/add/edit/delete need the app secret")
+    else:
+        print_field("Write auth", "OFF — anyone who reaches this can add/edit/delete")
+        print("  (set APP_SECRET in .env to require it — see .env.example)", flush=True)
     print(flush=True)
 
     cloudflared_path = find_cloudflared()

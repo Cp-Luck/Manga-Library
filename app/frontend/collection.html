@@ -105,6 +105,50 @@ one, or one Google Books just doesn't have a record for.
 <script>
 (function () {
   const API_BASE = window.location.origin;
+
+  // Write-auth: if the backend has APP_SECRET set, every write (add/edit/
+  // delete/cover-upload) needs an X-App-Secret header. Stored in
+  // localStorage once entered so it's only asked for once per browser. If
+  // the server has no secret configured, writes work exactly as before —
+  // the header is simply ignored server-side, and 401 never happens so
+  // this never prompts.
+  const SECRET_STORAGE_KEY = "manga_app_secret";
+
+  function getStoredSecret() {
+    try {
+      return localStorage.getItem(SECRET_STORAGE_KEY) || "";
+    } catch {
+      return ""; // localStorage can throw in some private-browsing contexts
+    }
+  }
+
+  function promptForSecret() {
+    const value = prompt("Enter the app secret to make changes (set as APP_SECRET on the server):");
+    const trimmed = (value || "").trim();
+    if (trimmed) {
+      try { localStorage.setItem(SECRET_STORAGE_KEY, trimmed); } catch {}
+    }
+    return trimmed;
+  }
+
+  // Wraps fetch for write requests: attaches the stored secret if we have
+  // one, and on a 401 (secret required but missing/wrong) prompts once and
+  // retries automatically instead of just failing.
+  async function authFetch(url, options = {}) {
+    const secret = getStoredSecret();
+    const headers = { ...(options.headers || {}) };
+    if (secret) headers["X-App-Secret"] = secret;
+
+    let res = await fetch(url, { ...options, headers });
+    if (res.status === 401) {
+      const newSecret = promptForSecret();
+      if (newSecret) {
+        res = await fetch(url, { ...options, headers: { ...headers, "X-App-Secret": newSecret } });
+      }
+    }
+    return res;
+  }
+
   const seriesList = document.getElementById("series-list");
   const status = document.getElementById("collection-status");
   const countEl = document.getElementById("collection-count");
@@ -270,7 +314,7 @@ one, or one Google Books just doesn't have a record for.
         patchBody.series_title = newSeriesTitle;
       }
       if (Object.keys(patchBody).length > 0) {
-        const res = await fetch(`${API_BASE}/volumes/${editingVolume.id}`, {
+        const res = await authFetch(`${API_BASE}/volumes/${editingVolume.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(patchBody),
@@ -282,7 +326,7 @@ one, or one Google Books just doesn't have a record for.
       if (file) {
         const formData = new FormData();
         formData.append("file", file);
-        const res = await fetch(`${API_BASE}/volumes/${editingVolume.id}/cover`, {
+        const res = await authFetch(`${API_BASE}/volumes/${editingVolume.id}/cover`, {
           method: "POST",
           body: formData,
         });
@@ -311,7 +355,7 @@ one, or one Google Books just doesn't have a record for.
       return false;
     }
     try {
-      const res = await fetch(`${API_BASE}/volumes/${v.id}`, { method: "DELETE" });
+      const res = await authFetch(`${API_BASE}/volumes/${v.id}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`${res.status}`);
       await load(); // refetch so counts and series grouping stay correct
       return true;
@@ -362,7 +406,7 @@ one, or one Google Books just doesn't have a record for.
     addSaveBtn.disabled = true;
     addMessage.textContent = "Adding...";
     try {
-      const res = await fetch(`${API_BASE}/volumes`, {
+      const res = await authFetch(`${API_BASE}/volumes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

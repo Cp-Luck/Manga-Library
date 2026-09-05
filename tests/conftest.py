@@ -41,12 +41,21 @@ def temp_covers_dir(tmp_path, monkeypatch):
 @pytest.fixture
 def client(temp_db, temp_covers_dir, tmp_path, monkeypatch):
     """A TestClient for the FastAPI app, fully isolated from real data:
-    throwaway db, throwaway covers dir, throwaway scan log."""
+    throwaway db, throwaway covers dir, throwaway scan log.
+
+    Also forces write-auth off by default (APP_SECRET = None), regardless
+    of whatever's actually in .env on the machine running the suite — tests
+    shouldn't pass or fail based on ambient real config. Every test in this
+    file implicitly relies on writes being open; test_auth.py is the one
+    place that deliberately turns the secret back on, via the same
+    monkeypatch, to test the gated behavior itself.
+    """
     from fastapi.testclient import TestClient
 
     from app.backend import main as main_module
 
     monkeypatch.setattr(main_module, "SCAN_LOG_PATH", tmp_path / "scan_log.jsonl")
+    monkeypatch.setattr(main_module, "APP_SECRET", None)
 
     with TestClient(main_module.app) as test_client:
         yield test_client

@@ -3,7 +3,7 @@
 A personal FastAPI backend for tracking a physical manga collection: scan a
 barcode to log a volume, browse the result as a cover-art grid.
 
-**133 volumes · 31 series · 194 scans logged · 41 automated tests · GitHub Actions CI**
+**133 volumes · 31 series · 194 scans logged · 55 automated tests · GitHub Actions CI**
 
 ![Collection view — cover-art grid grouped by series](docs/collection-screenshot.jpg)
 
@@ -54,6 +54,11 @@ Copy `.env.example` to `.env` and fill in `GOOGLE_BOOKS_API_KEY` (free — from
 API", create an API key). Without it, ISBN lookups run unauthenticated and
 will hit Google's near-zero anonymous quota (429s on most requests). `.env`
 is gitignored — never commit it.
+
+Optionally also set `APP_SECRET` in `.env` to any string of your choosing —
+see [Write authentication](#write-authentication) below for what it does
+and why you'd want it before leaving the phone-scanning tunnel running
+unattended.
 
 ```bash
 python run.py
@@ -123,17 +128,42 @@ happened yet.
 
 ### API routes
 
+🔒 = requires the `X-App-Secret` header if `APP_SECRET` is set (see
+[Write authentication](#write-authentication)) — unmarked routes are never
+gated, regardless of that setting.
+
 | Method | Path                          | Purpose                                              |
 |--------|-------------------------------|-------------------------------------------------------|
-| POST   | `/scan/isbn`                  | Look up/register a volume from a scanned ISBN, auto-fetching its cover |
-| POST   | `/volumes`                    | Add a volume by hand — no barcode/lookup involved      |
-| DELETE | `/volumes/{id}`               | Remove a volume (undo a scan, or a deliberate removal from `/collection`) |
-| PATCH  | `/volumes/{id}`                | Correct a volume's number, or move it to a different series |
-| POST   | `/volumes/{id}/cover`         | Manually attach a cover image                          |
+| POST   | 🔒 `/scan/isbn`               | Look up/register a volume from a scanned ISBN, auto-fetching its cover |
+| POST   | 🔒 `/volumes`                 | Add a volume by hand — no barcode/lookup involved      |
+| DELETE | 🔒 `/volumes/{id}`            | Remove a volume (undo a scan, or a deliberate removal from `/collection`) |
+| PATCH  | 🔒 `/volumes/{id}`             | Correct a volume's number, or move it to a different series |
+| POST   | 🔒 `/volumes/{id}/cover`      | Manually attach a cover image                          |
 | GET    | `/library`                    | Full collection, grouped by series                     |
 | GET    | `/series`                     | List all series                                        |
 | GET    | `/series/{series_id}/volumes` | Volumes belonging to one series                         |
 | GET    | `/collection`                 | The cover-art grid browser page                          |
+
+### Write authentication
+
+There's no login system, but there is an optional gate on the routes that
+change data. Set `APP_SECRET` in `.env` to any string and every write
+(scan/add/edit/delete/cover-upload) requires it via an `X-App-Secret`
+header; leave it unset and writes stay exactly as open as they've always
+been. Reading your collection (`/library`, `/collection`, `/series`) is
+**never** gated either way — the goal is "someone with the tunnel URL can
+look but not touch," not full authentication.
+
+That distinction matches how this actually gets used: checking "do I
+already own volume 5?" while standing in a bookstore is read-only and low
+stakes even if the tunnel URL leaked; scanning a new purchase or deleting a
+volume is not something a stranger who found that URL should be able to do.
+`scanner.html`/`collection.html` store the secret in `localStorage` after
+the first prompt, so in practice you enter it once per browser, not once
+per scan. `run.py`'s startup banner tells you which state you're in
+(`Write auth: ON` / `OFF`) every time you start the server, specifically so
+this isn't something you forget you left off before opening the tunnel to
+the internet.
 
 ### Project structure
 
@@ -171,11 +201,15 @@ Gitignored runtime data (created automatically, never committed):
 python -m pytest -q
 ```
 
-41 tests: title parsing (the tricky Google Books title formats documented
+55 tests: title parsing (the tricky Google Books title formats documented
 in `titles.py`'s own comments), the `db.py` data-access layer (series
 dedup, volume CRUD, series reassignment, a database-level race-condition
 fix), cover upload validation (oversized files, non-image bytes, correct
-format detection), and every API route through FastAPI's `TestClient`.
+format detection), cover path resolution across the Windows/Linux path
+formats this app has actually stored (see [Engineering
+Decisions](#engineering-decisions)), the optional write-auth gate (open by
+default, blocks unauthenticated writes once configured, never blocks reads
+either way), and every API route through FastAPI's `TestClient`.
 Google Books calls are faked in the API tests rather than hit for real, so
 the suite is deterministic and doesn't burn API quota. Every test runs
 against a throwaway SQLite file and covers directory — never `manga.db` or
@@ -193,7 +227,7 @@ Numbers from my own collection as of this writing, pulled directly from
 - 126 of those volumes (95%) have a cover image attached automatically
   from Google Books
 - 194 scan events logged since I started using it
-- 41 automated tests, all passing in CI
+- 55 automated tests, all passing in CI
 
 This isn't a security audit or a certification — but the codebase does
 follow a few specific defensive practices worth naming rather than just
@@ -237,9 +271,43 @@ first) now enforces this for real; the application code just catches the
 resulting `IntegrityError` for the loser of that race and returns the
 winner's id instead of a 500.
 
+**Gating writes, not reads.** The obvious version of "add auth" protects
+every route equally. That's the wrong shape for how this app is actually
+used: browsing the collection while standing in a bookstore ("do I already
+own volume 5?") is the single most common thing done from outside the
+house, it's read-only, and the worst case if that leaked is someone sees a
+manga list. Scanning a new purchase or deleting a volume is a write, and
+the worst case there is someone corrupts real data. A `Depends()` on only
+the mutating routes gets that distinction for free — reads need nothing
+extra, writes need a header — rather than building two separate API
+surfaces or bolting a permission level onto every route.
+
+**Storing a bare filename for covers, not a full path.** `cover_image_path`
+used to store the full absolute path returned by `Path(...)` at save time —
+harmless as long as the app only ever ran on one machine. It stopped being
+harmless the moment this app started running on both a Windows dev machine
+and a Linux (Raspberry Pi) production box against *the same database*:
+`pathlib.Path` parses separators according to whatever OS is running it
+right now, not whichever OS wrote the value, so a Windows path like
+`C:\Coding\...\covers\x.jpg` is unparseable as a path at all on Linux — it
+comes back as one opaque string instead of splitting out the filename,
+breaking every cover image saved before the fix. The real bug wasn't
+"forgot to convert path separators"; it was storing something
+platform-dependent in the first place when only the filename was ever
+actually needed. `save_cover()` now stores just the filename, and
+`cover_url()`/`cover_file_path()` extract it from either format via a
+manual `\`-or-`/` split rather than `pathlib`, so old rows written by
+either OS keep working without a forced migration — though a one-time
+backfill (tested against a copy of the live database first, same as the
+series-title migration) was still run on both machines to normalize the
+existing 126 rows for consistency.
+
 ## Known Limitations
 
-- No auth — fine for personal/local use, not for anything public-facing
+- No real login/user system — the optional `APP_SECRET` gate (see [Write
+  authentication](#write-authentication)) protects writes with a single
+  shared secret, which is appropriate for "just me" but isn't multi-user
+  auth and isn't on unless you turn it on
 - No formal migration framework (e.g. Alembic). Schema changes ship as
   additive, idempotent `CREATE TABLE`/`CREATE INDEX ... IF NOT EXISTS`
   statements run on every startup, which is adequate for the additive

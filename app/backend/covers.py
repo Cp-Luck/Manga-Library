@@ -10,6 +10,7 @@ removed once auto-fetching from Google Books made it unnecessary.)
 """
 
 import io
+import re
 import uuid
 from pathlib import Path
 
@@ -35,12 +36,32 @@ MAX_COVER_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_COVER_FORMATS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif"}
 
 
+def _extract_filename(stored_value: str) -> str:
+    """Pulls just the filename out of a stored cover_image_path — robust to
+    it being a bare filename (the current, correct format) or a legacy full
+    path saved by an older version of this app, in either Windows or POSIX
+    style. Deliberately not pathlib.Path(...).name: pathlib parses
+    separators according to the *current* platform, so a Windows-style path
+    processed on Linux (or vice versa — this app has now run as both, same
+    database) doesn't split at all and returns the whole garbled string.
+    Splitting on both separators unconditionally works regardless of which
+    OS wrote the value or which OS is reading it now."""
+    return re.split(r"[\\/]", stored_value)[-1]
+
+
 def cover_url(cover_image_path):
-    """Turns a stored filesystem path into a URL under /covers, or None if
+    """Turns a stored cover_image_path into a URL under /covers, or None if
     this volume has no cover (Google Books had none for its ISBN)."""
     if not cover_image_path:
         return None
-    return f"/covers/{Path(cover_image_path).name}"
+    return f"/covers/{_extract_filename(cover_image_path)}"
+
+
+def cover_file_path(cover_image_path) -> Path:
+    """Resolves a stored cover_image_path to the real, currently-valid
+    filesystem path under COVERS_DIR — for callers that need to actually
+    touch the file (e.g. deleting it), not just build a URL."""
+    return COVERS_DIR / _extract_filename(cover_image_path)
 
 
 def _detect_cover_extension(image_bytes: bytes) -> str | None:
@@ -67,23 +88,28 @@ def _detect_cover_extension(image_bytes: bytes) -> str | None:
 def save_cover(volume_id: int, image_bytes: bytes) -> str | None:
     """Validates and saves a cover image (fetched from Google Books, or
     manually uploaded from the collection page) and links it to the volume.
-    Returns the saved filesystem path on success, or None if image_bytes
-    isn't a genuine, supported, size-bounded image — callers use the path
-    directly rather than re-querying the DB for it."""
+    Returns the saved filename on success, or None if image_bytes isn't a
+    genuine, supported, size-bounded image — callers use it directly rather
+    than re-querying the DB for it.
+
+    Stores the bare filename in the DB, not a full path — this app has run
+    on both Windows and Linux against the same database, and a full path is
+    tied to whichever OS wrote it (see _extract_filename's docstring). The
+    filename alone is portable; COVERS_DIR is applied locally wherever it's
+    actually needed (cover_url, cover_file_path)."""
     extension = _detect_cover_extension(image_bytes)
     if extension is None:
         return None
 
     cover_filename = f"{uuid.uuid4().hex}{extension}"
-    cover_path = COVERS_DIR / cover_filename
-    cover_path.write_bytes(image_bytes)
+    (COVERS_DIR / cover_filename).write_bytes(image_bytes)
 
     with db.get_connection() as conn:
         conn.execute(
             "UPDATE volumes SET cover_image_path = ? WHERE id = ?",
-            (str(cover_path), volume_id),
+            (cover_filename, volume_id),
         )
-    return str(cover_path)
+    return cover_filename
 
 
 async def try_fetch_cover_from_google(volume_id: int, image_links: dict) -> bool:
